@@ -22,7 +22,7 @@ func main() {
 	if strings.TrimSpace(cfg.AccessPassword) == "" {
 		log.Fatal("ACCESS_PASSWORD is not set")
 	}
-	db := storage.MustOpen("bot.db")
+	db := storage.MustOpen(cfg.DBPath)
 	defer db.Close()
 
 	if cfg.Bot1Token == "" {

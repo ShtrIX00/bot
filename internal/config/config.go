@@ -14,6 +14,9 @@ type Config struct {
 
 	AccessPassword string
 
+	// ✅ общий путь к БД
+	DBPath string
+
 	// bot1
 	Accounting1ChatID   int64
 	Accounting2ChatID   int64
@@ -34,14 +37,19 @@ type Config struct {
 }
 
 func MustLoad() *Config {
+	dbPath := strings.TrimSpace(os.Getenv("DB_PATH"))
+	if dbPath == "" {
+		dbPath = "bot.db"
+	}
+
 	cfg := &Config{
 		Bot1Token: os.Getenv("BOT1_TOKEN"),
 		Bot2Token: os.Getenv("BOT2_TOKEN"),
 		Bot3Token: os.Getenv("BOT3_TOKEN"),
 
 		AccessPassword: os.Getenv("ACCESS_PASSWORD"),
+		DBPath:         dbPath,
 
-		// ✅ как у тебя в .env: ACCOUNTING_1_CHAT_ID ...
 		Accounting1ChatID: mustInt64("ACCOUNTING_1_CHAT_ID"),
 		Accounting2ChatID: mustInt64("ACCOUNTING_2_CHAT_ID"),
 		Accounting3ChatID: mustInt64("ACCOUNTING_3_CHAT_ID"),

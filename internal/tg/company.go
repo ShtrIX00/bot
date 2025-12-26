@@ -5,30 +5,12 @@ import (
 	"fmt"
 	"log"
 	"strings"
-	"sync"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
 	"TGBOT2/internal/config"
 	"TGBOT2/internal/storage"
 )
-
-var (
-	companyMu    sync.RWMutex
-	companyCache = map[int64]int{} // telegramUserID -> company
-)
-
-func setCachedCompany(telegramUserID int64, company int) {
-	companyMu.Lock()
-	defer companyMu.Unlock()
-	companyCache[telegramUserID] = company
-}
-
-func getCachedCompany(telegramUserID int64) int {
-	companyMu.RLock()
-	defer companyMu.RUnlock()
-	return companyCache[telegramUserID]
-}
 
 func companyReplyKeyboard() tgbotapi.ReplyKeyboardMarkup {
 	kb := tgbotapi.NewReplyKeyboard(
@@ -70,7 +52,6 @@ func TryParseCompanyChoice(text string) (int, bool) {
 
 func SaveCompanyChoice(bot *tgbotapi.BotAPI, db *sql.DB, chatID int64, telegramUserID int64, company int) {
 	// ✅ сохраняем в кэш ВСЕГДА
-	setCachedCompany(telegramUserID, company)
 
 	// ✅ пытаемся сохранить в БД и логируем ошибку (раньше ты её терял)
 	if err := storage.SetUserCompanyByTelegramID(db, telegramUserID, company); err != nil {

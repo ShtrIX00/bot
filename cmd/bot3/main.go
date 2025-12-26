@@ -26,7 +26,7 @@ func main() {
 		log.Fatal("BOT3_TOKEN is not set")
 	}
 
-	db := storage.MustOpen("bot.db")
+	db := storage.MustOpen(cfg.DBPath)
 	defer db.Close()
 
 	bot, err := tgbotapi.NewBotAPI(cfg.Bot3Token)

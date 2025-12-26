@@ -2,27 +2,45 @@ package storage
 
 import (
 	"database/sql"
+	"fmt"
 	"log"
+	"net/url"
 
 	_ "modernc.org/sqlite"
 )
 
 func MustOpen(path string) *sql.DB {
-	db, err := sql.Open("sqlite", path)
+	// ✅ параметры для многопроцессного доступа (bot1/bot2/bot3)
+	dsn := withSQLiteParams(path)
+
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		log.Fatalf("cannot open sqlite db: %v", err)
 	}
+
 	if err := db.Ping(); err != nil {
 		log.Fatalf("cannot ping sqlite db: %v", err)
 	}
+
 	if err := migrate(db); err != nil {
 		log.Fatalf("cannot run migrations: %v", err)
 	}
+
 	return db
 }
 
+func withSQLiteParams(path string) string {
+	// modernc.org/sqlite понимает query-параметры
+	// journal_mode=WAL снижает lock’и, busy_timeout помогает переживать конкуренцию.
+	q := url.Values{}
+	q.Set("_journal_mode", "WAL")
+	q.Set("_busy_timeout", "5000")
+	q.Set("_foreign_keys", "1")
+
+	return fmt.Sprintf("%s?%s", path, q.Encode())
+}
+
 func migrate(db *sql.DB) error {
-	// users
 	_, err := db.Exec(`
 CREATE TABLE IF NOT EXISTS users (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -41,7 +59,6 @@ CREATE TABLE IF NOT EXISTS users (
 		return err
 	}
 
-	// msg_map
 	_, err = db.Exec(`
 CREATE TABLE IF NOT EXISTS msg_map (
   id              INTEGER PRIMARY KEY AUTOINCREMENT,

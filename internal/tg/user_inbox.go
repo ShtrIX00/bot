@@ -85,12 +85,7 @@ func HandleUserMessage(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, m *
 		log.Printf("GetUserCompanyByTelegramID error: %v", err)
 		company = 0
 	}
-
-	// ✅ если БД вернула 0 — берём из кэша (фикс твоей проблемы)
-	if company == 0 {
-		company = getCachedCompany(int64(m.From.ID))
-	}
-
+	
 	if company == 0 {
 		SendCompanyPicker(bot, m.Chat.ID)
 		return
