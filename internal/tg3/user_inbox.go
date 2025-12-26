@@ -21,6 +21,7 @@ const (
 	btnCancel          = "❌ Отмена"
 	btnSupport         = "🆘 Поддержка"
 	btnSkip            = "⏭ Пропуск"
+	btnContinue        = "▶️ Продолжить"
 
 	company1 = "Компания 1"
 	company2 = "Компания 2"
@@ -38,6 +39,7 @@ const (
 	stageAwaitPurpose
 	stageAwaitContract
 	stageSupportQuestion
+	stageAwaitContinue // пауза
 )
 
 type applicationDraft struct {
@@ -48,7 +50,6 @@ type applicationDraft struct {
 	Purpose   string
 	Contract  string
 
-	// данные с сайта
 	RusKPP     string
 	RusName    string
 	RusAddress string
@@ -65,6 +66,24 @@ var (
 	appMu     sync.Mutex
 	appByUser = map[int64]*userAppState{} // telegram_id -> state
 )
+
+// ✅ метим сообщения, которые ушли в поддержку (для reply в ответе навигатора)
+var (
+	supportMu        sync.RWMutex
+	supportQuestions = map[string]bool{} // key = "chatID:msgID"
+)
+
+func markSupportQuestion(chatID int64, msgID int) {
+	supportMu.Lock()
+	defer supportMu.Unlock()
+	supportQuestions[fmt.Sprintf("%d:%d", chatID, msgID)] = true
+}
+
+func isSupportQuestion(chatID int64, msgID int) bool {
+	supportMu.RLock()
+	defer supportMu.RUnlock()
+	return supportQuestions[fmt.Sprintf("%d:%d", chatID, msgID)]
+}
 
 // ---------- keyboards ----------
 
@@ -117,6 +136,19 @@ func companyPickerKeyboard() tgbotapi.ReplyKeyboardMarkup {
 	)
 	kb.ResizeKeyboard = true
 	kb.OneTimeKeyboard = true
+	return kb
+}
+
+func continueKeyboard() tgbotapi.ReplyKeyboardMarkup {
+	kb := tgbotapi.NewReplyKeyboard(
+		tgbotapi.NewKeyboardButtonRow(
+			tgbotapi.NewKeyboardButton(btnContinue),
+		),
+		tgbotapi.NewKeyboardButtonRow(
+			tgbotapi.NewKeyboardButton(btnCancel),
+		),
+	)
+	kb.ResizeKeyboard = true
 	return kb
 }
 
@@ -212,7 +244,7 @@ func HandleUserMessage(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, m *
 		return
 	}
 
-	// отвечающие — игнор (как было)
+	// отвечающие — игнор
 	if cfg.ResponderIDs[int64(m.From.ID)] {
 		if m.IsCommand() && m.Command() == "start" {
 			_, _ = bot.Send(tgbotapi.NewMessage(m.Chat.ID, StartText()))
@@ -222,7 +254,6 @@ func HandleUserMessage(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, m *
 
 	_ = storage.UpsertUser(db, mkUser(m))
 
-	// блок
 	blocked, err := storage.IsUserBlockedByTelegramID(db, int64(m.From.ID))
 	if err != nil || blocked {
 		return
@@ -240,7 +271,6 @@ func HandleUserMessage(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, m *
 			msg.ReplyMarkup = mainMenuKeyboard()
 			_, _ = bot.Send(msg)
 		} else {
-			// до пароля — без кнопки заявки
 			_, _ = bot.Send(tgbotapi.NewMessage(m.Chat.ID, StartText()))
 		}
 		return
@@ -258,12 +288,40 @@ func HandleUserMessage(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, m *
 		return
 	}
 
-	// ----- allowed=1 -----
-
 	txt := strings.TrimSpace(m.Text)
 	st := getOrCreateState(int64(m.From.ID))
 
-	// кнопки на шагах заявки
+	// ✅ ПАУЗА: пользователь может свободно писать навигатору
+	if st.Stage == stageAwaitContinue {
+		if txt == btnCancel {
+			clearState(int64(m.From.ID))
+			msg := tgbotapi.NewMessage(m.Chat.ID, "Заявка отменена.")
+			msg.ReplyMarkup = mainMenuKeyboard()
+			_, _ = bot.Send(msg)
+			return
+		}
+		if txt == btnContinue {
+			st.Stage = st.ReturnStage
+			st.ReturnStage = stageIdle
+			promptForStage(bot, m.Chat.ID, st)
+			return
+		}
+
+		// любое другое сообщение/файл/фото — отправляем навигатору, НЕ ругаемся
+		if txt != "" || m.Document != nil || len(m.Photo) > 0 {
+			header := "От: " + UserRef(m.From)
+			sendHeaderAndMap(bot, db, cfg.Bot3NavigatorChatID, header, m.Chat.ID, m.MessageID)
+			forwardAndMap(bot, db, cfg.Bot3NavigatorChatID, m.Chat.ID, m.MessageID, m.Chat.ID, m.MessageID)
+
+			// ✅ помечаем как support, чтобы ответ пришёл reply (если навигатор ответит reply в своём чате)
+			markSupportQuestion(m.Chat.ID, m.MessageID)
+		}
+
+		// ничего пользователю не пишем, чтобы не мешать диалогу
+		return
+	}
+
+	// кнопки во время заявки
 	if st.Stage != stageIdle {
 		if txt == btnCancel {
 			clearState(int64(m.From.ID))
@@ -291,35 +349,30 @@ func HandleUserMessage(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, m *
 		return
 	}
 
-	// поддержка во время заявки — отправляем навигатору как обычно
+	// поддержка: отправили вопрос → ставим на паузу
 	if st.Stage == stageSupportQuestion {
 		if txt == "" && m.Document == nil && len(m.Photo) == 0 {
 			_, _ = bot.Send(tgbotapi.NewMessage(m.Chat.ID, "Напишите текст или отправьте файл/фото."))
 			return
 		}
+
 		header := "От: " + UserRef(m.From)
 		sendHeaderAndMap(bot, db, cfg.Bot3NavigatorChatID, header, m.Chat.ID, m.MessageID)
 		forwardAndMap(bot, db, cfg.Bot3NavigatorChatID, m.Chat.ID, m.MessageID, m.Chat.ID, m.MessageID)
 
-		st.Stage = st.ReturnStage
-		st.ReturnStage = stageIdle
+		// ✅ помечаем этот вопрос как support
+		markSupportQuestion(m.Chat.ID, m.MessageID)
 
-		msg := tgbotapi.NewMessage(m.Chat.ID, "Вопрос отправлен. Продолжаем заполнение заявки.")
-		switch st.Stage {
-		case stageAwaitContract:
-			msg.ReplyMarkup = contractKeyboard()
-		case stageChooseCompany:
-			msg.ReplyMarkup = companyPickerKeyboard()
-		default:
-			msg.ReplyMarkup = stepControlKeyboard()
-		}
+		// ✅ пауза
+		st.Stage = stageAwaitContinue
+
+		msg := tgbotapi.NewMessage(m.Chat.ID, "Вопрос отправлен. Заполнение заявки поставлено на паузу.\nНажмите «Продолжить», чтобы продолжить с того же шага.")
+		msg.ReplyMarkup = continueKeyboard()
 		_, _ = bot.Send(msg)
-
-		promptForStage(bot, m.Chat.ID, st)
 		return
 	}
 
-	// если заявки нет — обычный режим: просто пересылаем навигатору, без лишних сообщений пользователю
+	// обычный режим вне заявки — как раньше: просто навигатору
 	if st.Stage == stageIdle {
 		header := "От: " + UserRef(m.From)
 		sendHeaderAndMap(bot, db, cfg.Bot3NavigatorChatID, header, m.Chat.ID, m.MessageID)
@@ -341,6 +394,7 @@ func HandleUserMessage(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, m *
 		st.Draft.Company = choice
 		st.Stage = stageAwaitINN
 
+		// убираем клаву выбора компании
 		msg := tgbotapi.NewMessage(m.Chat.ID, "Введите ИНН:")
 		msg.ReplyMarkup = stepControlKeyboard()
 		_, _ = bot.Send(msg)
@@ -353,7 +407,6 @@ func HandleUserMessage(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, m *
 		}
 		st.Draft.INN = txt
 
-		// ✅ запрос rusprofile
 		htmlText, err := fetchRusprofileHTML(txt)
 		if err != nil {
 			st.Draft.RusErr = "ошибка запроса rusprofile: " + err.Error()
@@ -442,10 +495,8 @@ func sendForApproval(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, m *tg
 
 	text := strings.Join(parts, "\n")
 
-	// отправляем в группу подтверждения
 	SendToApproval(bot, db, cfg, m.Chat.ID, m.MessageID, text)
 
-	// пользователю — только статус
 	msg := tgbotapi.NewMessage(m.Chat.ID, "Заявка отправлена на подтверждение ✅")
 	msg.ReplyMarkup = mainMenuKeyboard()
 	_, _ = bot.Send(msg)
@@ -459,8 +510,6 @@ func nz(s string) string {
 	}
 	return strings.TrimSpace(s)
 }
-
-// ---------- existing helpers ----------
 
 func mkUser(m *tgbotapi.Message) *storage.User {
 	u := &storage.User{
