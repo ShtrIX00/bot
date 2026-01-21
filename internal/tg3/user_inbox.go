@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -22,6 +23,8 @@ const (
 	btnSupport         = "🆘 Поддержка"
 	btnSkip            = "⏭ Пропуск"
 	btnContinue        = "▶️ Продолжить"
+	btnAddItem         = "➕ Добавить позицию"
+	btnFinishItems     = "✅ Готово"
 
 	company1 = "Компания 1"
 	company2 = "Компания 2"
@@ -35,8 +38,12 @@ const (
 	stageChooseCompany
 	stageAwaitINN
 	stageAwaitLegalName
-	stageAwaitAmount
-	stageAwaitPurpose
+	stageAwaitItemName
+	stageAwaitItemQty
+	stageAwaitItemUnit
+	stageAwaitItemUnitPrice
+	stageAwaitItemLineTotal
+	stageAskMoreItems
 	stageAwaitContract
 	stageSupportQuestion
 	stageAwaitContinue // пауза
@@ -46,9 +53,11 @@ type applicationDraft struct {
 	Company   string
 	INN       string
 	LegalName string
-	Amount    string
-	Purpose   string
 	Contract  string
+
+	Items []appItem
+	// суммарно по позициям (заполняем перед отправкой в approval)
+	TotalSum float64
 
 	RusKPP     string
 	RusName    string
@@ -60,6 +69,8 @@ type userAppState struct {
 	Stage       appStage
 	ReturnStage appStage
 	Draft       applicationDraft
+	// временно храним текущую позицию пока пользователь заполняет шаги
+	CurItem appItem
 }
 
 var (
@@ -112,6 +123,35 @@ func contractKeyboard() tgbotapi.ReplyKeyboardMarkup {
 	kb := tgbotapi.NewReplyKeyboard(
 		tgbotapi.NewKeyboardButtonRow(
 			tgbotapi.NewKeyboardButton(btnSkip),
+		),
+		tgbotapi.NewKeyboardButtonRow(
+			tgbotapi.NewKeyboardButton(btnCancel),
+			tgbotapi.NewKeyboardButton(btnSupport),
+		),
+	)
+	kb.ResizeKeyboard = true
+	return kb
+}
+
+func qtyKeyboard() tgbotapi.ReplyKeyboardMarkup {
+	kb := tgbotapi.NewReplyKeyboard(
+		tgbotapi.NewKeyboardButtonRow(
+			tgbotapi.NewKeyboardButton(btnSkip),
+		),
+		tgbotapi.NewKeyboardButtonRow(
+			tgbotapi.NewKeyboardButton(btnCancel),
+			tgbotapi.NewKeyboardButton(btnSupport),
+		),
+	)
+	kb.ResizeKeyboard = true
+	return kb
+}
+
+func itemsDoneKeyboard() tgbotapi.ReplyKeyboardMarkup {
+	kb := tgbotapi.NewReplyKeyboard(
+		tgbotapi.NewKeyboardButtonRow(
+			tgbotapi.NewKeyboardButton(btnAddItem),
+			tgbotapi.NewKeyboardButton(btnFinishItems),
 		),
 		tgbotapi.NewKeyboardButtonRow(
 			tgbotapi.NewKeyboardButton(btnCancel),
@@ -191,14 +231,35 @@ func promptForStage(bot *tgbotapi.BotAPI, chatID int64, st *userAppState) {
 		msg.ReplyMarkup = stepControlKeyboard()
 		_, _ = bot.Send(msg)
 
-	case stageAwaitAmount:
-		msg := tgbotapi.NewMessage(chatID, "Введите сумму платежа:")
+	case stageAwaitItemName:
+		n := len(st.Draft.Items) + 1
+		msg := tgbotapi.NewMessage(chatID, fmt.Sprintf("Введите наименование позиции №%d:", n))
 		msg.ReplyMarkup = stepControlKeyboard()
 		_, _ = bot.Send(msg)
 
-	case stageAwaitPurpose:
-		msg := tgbotapi.NewMessage(chatID, "Введите назначение платежа:")
+	case stageAwaitItemQty:
+		msg := tgbotapi.NewMessage(chatID, "Введите количество (число). Можно «Пропуск» = 1:")
+		msg.ReplyMarkup = qtyKeyboard()
+		_, _ = bot.Send(msg)
+
+	case stageAwaitItemUnit:
+		msg := tgbotapi.NewMessage(chatID, "Введите единицу измерения (например: шт, кг, м, усл):")
 		msg.ReplyMarkup = stepControlKeyboard()
+		_, _ = bot.Send(msg)
+
+	case stageAwaitItemUnitPrice:
+		msg := tgbotapi.NewMessage(chatID, "Введите цену за единицу (например: 1000 или 1 000):")
+		msg.ReplyMarkup = stepControlKeyboard()
+		_, _ = bot.Send(msg)
+
+	case stageAwaitItemLineTotal:
+		msg := tgbotapi.NewMessage(chatID, "Введите ОБЩУЮ стоимость по позиции (итого по строке). Это НЕ цена за единицу:")
+		msg.ReplyMarkup = stepControlKeyboard()
+		_, _ = bot.Send(msg)
+
+	case stageAskMoreItems:
+		msg := tgbotapi.NewMessage(chatID, "Добавить ещё позицию или завершить список?")
+		msg.ReplyMarkup = itemsDoneKeyboard()
 		_, _ = bot.Send(msg)
 
 	case stageAwaitContract:
@@ -431,29 +492,113 @@ func HandleUserMessage(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, m *
 			return
 		}
 		st.Draft.LegalName = txt
-		st.Stage = stageAwaitAmount
+		// начинаем заполнять позиции
+		st.Stage = stageAwaitItemName
+		st.CurItem = appItem{}
 		promptForStage(bot, m.Chat.ID, st)
 		return
 
-	case stageAwaitAmount:
+	case stageAwaitItemName:
 		if txt == "" {
 			promptForStage(bot, m.Chat.ID, st)
 			return
 		}
-		st.Draft.Amount = txt
-		st.Stage = stageAwaitPurpose
+		st.CurItem = appItem{Name: txt, Qty: 1}
+		st.Stage = stageAwaitItemQty
 		promptForStage(bot, m.Chat.ID, st)
 		return
 
-	case stageAwaitPurpose:
+	case stageAwaitItemQty:
+		if txt == btnSkip {
+			st.CurItem.Qty = 1
+			st.Stage = stageAwaitItemUnit
+			promptForStage(bot, m.Chat.ID, st)
+			return
+		}
 		if txt == "" {
 			promptForStage(bot, m.Chat.ID, st)
 			return
 		}
-		st.Draft.Purpose = txt
-		st.Stage = stageAwaitContract
+		q, qerr := strconv.ParseInt(strings.TrimSpace(txt), 10, 64)
+		if qerr != nil || q <= 0 {
+			msg := tgbotapi.NewMessage(m.Chat.ID, "Введите количество числом (например: 1, 2, 10) или нажмите «Пропуск».")
+			msg.ReplyMarkup = qtyKeyboard()
+			_, _ = bot.Send(msg)
+			return
+		}
+		st.CurItem.Qty = q
+		st.Stage = stageAwaitItemUnit
 		promptForStage(bot, m.Chat.ID, st)
 		return
+
+	case stageAwaitItemUnit:
+		u := strings.TrimSpace(txt)
+		if u == "" || u == btnSkip {
+			// если пользователь нажал пропуск — оставим пусто, в счёте подставим "шт"
+			u = ""
+		}
+		st.CurItem.Unit = u
+		st.Stage = stageAwaitItemUnitPrice
+		promptForStage(bot, m.Chat.ID, st)
+		return
+
+	case stageAwaitItemUnitPrice:
+		if txt == "" {
+			promptForStage(bot, m.Chat.ID, st)
+			return
+		}
+		p, perr := parseMoney(txt)
+		if perr != nil {
+			msg := tgbotapi.NewMessage(m.Chat.ID, "Не смог распознать цену. Пример: 1000 или 1 000")
+			msg.ReplyMarkup = stepControlKeyboard()
+			_, _ = bot.Send(msg)
+			return
+		}
+		st.CurItem.UnitPrice = p
+		st.Stage = stageAwaitItemLineTotal
+		promptForStage(bot, m.Chat.ID, st)
+		return
+
+	case stageAwaitItemLineTotal:
+		if txt == "" {
+			promptForStage(bot, m.Chat.ID, st)
+			return
+		}
+		s, serr := parseMoney(txt)
+		if serr != nil {
+			msg := tgbotapi.NewMessage(m.Chat.ID, "Не смог распознать сумму. Пример: 1000000 или 1 000 000")
+			msg.ReplyMarkup = stepControlKeyboard()
+			_, _ = bot.Send(msg)
+			return
+		}
+		st.CurItem.Total = s
+		st.Draft.Items = append(st.Draft.Items, st.CurItem)
+		st.CurItem = appItem{}
+		st.Stage = stageAskMoreItems
+		promptForStage(bot, m.Chat.ID, st)
+		return
+
+	case stageAskMoreItems:
+		switch txt {
+		case btnAddItem:
+			st.Stage = stageAwaitItemName
+			promptForStage(bot, m.Chat.ID, st)
+			return
+		case btnFinishItems:
+			if len(st.Draft.Items) == 0 {
+				st.Stage = stageAwaitItemName
+				promptForStage(bot, m.Chat.ID, st)
+				return
+			}
+			st.Stage = stageAwaitContract
+			promptForStage(bot, m.Chat.ID, st)
+			return
+		default:
+			msg := tgbotapi.NewMessage(m.Chat.ID, "Выберите вариант кнопкой снизу.")
+			msg.ReplyMarkup = itemsDoneKeyboard()
+			_, _ = bot.Send(msg)
+			return
+		}
 
 	case stageAwaitContract:
 		if txt == btnSkip {
@@ -474,14 +619,26 @@ func HandleUserMessage(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, m *
 func sendForApproval(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, m *tgbotapi.Message, st *userAppState) {
 	user := UserRef(m.From)
 
+	// считаем итоговую сумму
+	total := 0.0
+	for _, it := range st.Draft.Items {
+		total += it.Total
+	}
+	st.Draft.TotalSum = total
+
+	pos := []string{"Позиции:"}
+	for i, it := range st.Draft.Items {
+		pos = append(pos, fmt.Sprintf("%d) %s; кол-во=%d; ед=%s; цена=%.2f; итого=%.2f", i+1, it.Name, it.Qty, it.Unit, it.UnitPrice, it.Total))
+	}
+
 	parts := []string{
 		"📝 Заявка на подтверждение",
 		fmt.Sprintf("От: %s", user),
 		fmt.Sprintf("Компания: %s", st.Draft.Company),
 		fmt.Sprintf("ИНН: %s", st.Draft.INN),
 		fmt.Sprintf("Юр.лицо (ввод): %s", st.Draft.LegalName),
-		fmt.Sprintf("Сумма: %s", st.Draft.Amount),
-		fmt.Sprintf("Назначение: %s", st.Draft.Purpose),
+		strings.Join(pos, "\n"),
+		fmt.Sprintf("Сумма итого: %.2f", st.Draft.TotalSum),
 		fmt.Sprintf("Договор: %s", st.Draft.Contract),
 		"",
 		"Данные Rusprofile:",
@@ -495,7 +652,7 @@ func sendForApproval(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, m *tg
 
 	text := strings.Join(parts, "\n")
 
-	SendToApproval(bot, db, cfg, m.Chat.ID, m.MessageID, text)
+	SendApplicationToApproval(bot, db, cfg, m.Chat.ID, m.MessageID, text, st.Draft)
 
 	msg := tgbotapi.NewMessage(m.Chat.ID, "Заявка отправлена на подтверждение ✅")
 	msg.ReplyMarkup = mainMenuKeyboard()

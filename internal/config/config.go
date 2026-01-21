@@ -31,6 +31,8 @@ type Config struct {
 	// bot3
 	Bot3NavigatorChatID int64
 	Bot3ApprovalChatID  int64
+	// путь к xlsx-шаблону счёта (используется в bot3)
+	Bot3InvoiceTemplatePath string
 
 	ResponderIDs     map[int64]bool
 	ResponderAliases map[int64]string
@@ -63,6 +65,13 @@ func MustLoad() *Config {
 		Bot3NavigatorChatID: mustInt64("BOT3_NAVIGATOR_CHAT_ID"),
 		Bot3ApprovalChatID:  mustInt64("BOT3_APPROVAL_CHAT_ID"),
 	}
+
+	// ✅ шаблон счёта для bot3
+	tpl := strings.TrimSpace(os.Getenv("BOT3_INVOICE_TEMPLATE_PATH"))
+	if tpl == "" {
+		tpl = "assets/invoice_template.xlsx"
+	}
+	cfg.Bot3InvoiceTemplatePath = tpl
 
 	cfg.ResponderIDs = parseIDs(os.Getenv("RESPONDER_IDS"))
 	cfg.ResponderAliases = parseAliases(os.Getenv("RESPONDER_ALIASES"))

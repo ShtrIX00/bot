@@ -2,9 +2,12 @@ package tg3
 
 import (
 	"database/sql"
+	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
@@ -16,8 +19,11 @@ type approvalItem struct {
 	UserChatID    int64
 	UserMessageID int
 	Text          string
+	Draft         applicationDraft
+	AwaitFix      bool
 
-	AwaitFix bool
+	InvoiceNo int64
+	XlsxPath  string
 }
 
 var (
@@ -25,9 +31,45 @@ var (
 	approvalByID = map[int]*approvalItem{} // approval message_id -> item
 )
 
-func SendToApproval(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, userChatID int64, userMessageID int, text string) {
+func SendApplicationToApproval(
+	bot *tgbotapi.BotAPI,
+	db *sql.DB,
+	cfg *config.Config,
+	userChatID int64,
+	userMessageID int,
+	text string,
+	draft applicationDraft,
+) {
 	if cfg.Bot3ApprovalChatID == 0 {
-		// нет группы — просто молча не отправляем (или можно логировать)
+		// если нет чата подтверждения — просто сообщим пользователю
+		_, _ = bot.Send(tgbotapi.NewMessage(userChatID, "Заявка принята. (чат подтверждения не настроен)"))
+		return
+	}
+
+	// 1) номер счёта (уникальный)
+	invoiceNo, err := storage.NextInvoiceNumber(db)
+	if err != nil {
+		_, _ = bot.Send(tgbotapi.NewMessage(userChatID, "Не смог сформировать счёт: "+err.Error()))
+		return
+	}
+
+	// 2) дата
+	loc, lerr := time.LoadLocation("Europe/Moscow")
+	if lerr != nil {
+		loc = time.FixedZone("MSK", 3*60*60)
+	}
+	now := time.Now().In(loc)
+
+	// 3) шаблон
+	tpl := strings.TrimSpace(cfg.Bot3InvoiceTemplatePath)
+	if tpl == "" {
+		tpl = "assets/invoice_template.xlsx"
+	}
+
+	// 4) генерим xlsx
+	xlsxPath, perr := FillInvoiceTemplateXLSX(tpl, os.TempDir(), invoiceNo, now, draft, draft.Items)
+	if perr != nil {
+		_, _ = bot.Send(tgbotapi.NewMessage(userChatID, "Не смог сформировать счёт: "+perr.Error()))
 		return
 	}
 
@@ -38,27 +80,52 @@ func SendToApproval(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, userCh
 		),
 	)
 
-	msg := tgbotapi.NewMessage(cfg.Bot3ApprovalChatID, text)
-	msg.ReplyMarkup = kb
-	sent, err := bot.Send(msg)
-	if err != nil {
+	// 5) в approval отправляем ФАЙЛ (не текст)
+	doc := tgbotapi.NewDocument(cfg.Bot3ApprovalChatID, tgbotapi.FilePath(xlsxPath))
+	doc.Caption = fmt.Sprintf("Счёт № %d (xlsx)\n\n%s", invoiceNo, text)
+	doc.ReplyMarkup = kb
+
+	sent, sendErr := bot.Send(doc)
+	if sendErr != nil {
+		// ВАЖНО: показываем ошибку прямо в approval-чате
+		_, _ = bot.Send(tgbotapi.NewMessage(cfg.Bot3ApprovalChatID, "❌ Не смог отправить XLSX в этот чат: "+sendErr.Error()))
+		// И на всякий случай уведомим пользователя
+		_, _ = bot.Send(tgbotapi.NewMessage(userChatID, "Не смог отправить счёт на подтверждение."))
 		return
 	}
 
-	// маппинг: чтобы можно было reply-цепочки поддерживать, если надо
+	// как в старом варианте — маппинг reply цепочек
 	_ = storage.AddMap(db, cfg.Bot3ApprovalChatID, sent.MessageID, userChatID, userMessageID)
+
+	// 6) дополнительно — навигатору тоже ФАЙЛ (если задан)
+	if cfg.Bot3NavigatorChatID != 0 {
+		navDoc := tgbotapi.NewDocument(cfg.Bot3NavigatorChatID, tgbotapi.FilePath(xlsxPath))
+		navDoc.Caption = fmt.Sprintf("Счёт № %d (xlsx)\n\n%s", invoiceNo, text)
+		if _, err := bot.Send(navDoc); err != nil {
+			// не критично, но пусть будет видно
+			_, _ = bot.Send(tgbotapi.NewMessage(cfg.Bot3ApprovalChatID, "⚠️ Не смог отправить XLSX навигатору: "+err.Error()))
+		}
+	}
 
 	approvalMu.Lock()
 	approvalByID[sent.MessageID] = &approvalItem{
 		UserChatID:    userChatID,
 		UserMessageID: userMessageID,
 		Text:          text,
+		Draft:         draft,
 		AwaitFix:      false,
+		InvoiceNo:     invoiceNo,
+		XlsxPath:      xlsxPath,
 	}
 	approvalMu.Unlock()
 }
 
-func HandleApprovalCallback(bot *tgbotapi.BotAPI, cfg *config.Config, cq *tgbotapi.CallbackQuery) {
+// Оставляем имя SendToApproval, чтобы твой user_inbox.go не менять
+func SendToApproval(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, userChatID int64, userMessageID int, text string, draft applicationDraft) {
+	SendApplicationToApproval(bot, db, cfg, userChatID, userMessageID, text, draft)
+}
+
+func HandleApprovalCallback(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, cq *tgbotapi.CallbackQuery) {
 	if cq == nil || cq.Message == nil || cq.Message.Chat == nil {
 		return
 	}
@@ -79,12 +146,16 @@ func HandleApprovalCallback(bot *tgbotapi.BotAPI, cfg *config.Config, cq *tgbota
 
 	switch cq.Data {
 	case "app_ok":
-		// отправить пользователю итог (позже будет файл)
-		out := tgbotapi.NewMessage(item.UserChatID, item.Text)
-		_, _ = bot.Send(out)
+		if item.XlsxPath == "" {
+			_, _ = bot.Send(tgbotapi.NewMessage(item.UserChatID, "Не найден файл счёта для отправки."))
+			return
+		}
 
-		// отметить в группе
-		ack := tgbotapi.NewMessage(cfg.Bot3ApprovalChatID, "✅ Отправлено пользователю.")
+		doc := tgbotapi.NewDocument(item.UserChatID, tgbotapi.FilePath(item.XlsxPath))
+		doc.Caption = "Счёт на оплату № " + strconv.FormatInt(item.InvoiceNo, 10)
+		_, _ = bot.Send(doc)
+
+		ack := tgbotapi.NewMessage(cfg.Bot3ApprovalChatID, "✅ Счёт отправлен пользователю.")
 		ack.ReplyToMessageID = approvalMsgID
 		_, _ = bot.Send(ack)
 
@@ -103,8 +174,6 @@ func HandleApprovalCallback(bot *tgbotapi.BotAPI, cfg *config.Config, cq *tgbota
 	}
 }
 
-// Обрабатываем сообщения в группе подтверждения.
-// Если кто-то сделал reply на заявку после "Правка" — отправляем текст пользователю.
 func HandleApprovalGroupMessage(bot *tgbotapi.BotAPI, cfg *config.Config, m *tgbotapi.Message) {
 	if m == nil || m.Chat == nil {
 		return
@@ -127,12 +196,10 @@ func HandleApprovalGroupMessage(bot *tgbotapi.BotAPI, cfg *config.Config, m *tgb
 
 	reason := strings.TrimSpace(m.Text)
 	if reason == "" {
-		// если вдруг прислали не текст — можно игнорировать
 		return
 	}
 
-	text := "Заявка не подтверждена. Причина:\n" + reason + "\n\nПожалуйста, составьте заявку ещё раз с правками."
-	out := tgbotapi.NewMessage(item.UserChatID, text)
+	out := tgbotapi.NewMessage(item.UserChatID, "Заявка не подтверждена. Причина:\n"+reason+"\n\nСоставьте заявку заново с правками.")
 	_, _ = bot.Send(out)
 
 	ack := tgbotapi.NewMessage(cfg.Bot3ApprovalChatID, "📨 Причина отправлена пользователю.")
@@ -142,11 +209,4 @@ func HandleApprovalGroupMessage(bot *tgbotapi.BotAPI, cfg *config.Config, m *tgb
 	approvalMu.Lock()
 	delete(approvalByID, targetID)
 	approvalMu.Unlock()
-}
-
-// (необязательно) помощь на будущее, если захочешь делать callback data с id:
-// сейчас не нужно, т.к. мы используем cq.Message.MessageID как ключ.
-func parseInt(s string) int {
-	n, _ := strconv.Atoi(strings.TrimSpace(s))
-	return n
 }

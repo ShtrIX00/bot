@@ -74,5 +74,20 @@ CREATE TABLE IF NOT EXISTS msg_map (
 		return err
 	}
 
+	// ✅ последовательность номеров счёта (bot3)
+	_, err = db.Exec(`
+CREATE TABLE IF NOT EXISTS invoice_seq (
+  id       INTEGER PRIMARY KEY CHECK(id=1),
+  next_num INTEGER NOT NULL
+);
+`)
+	if err != nil {
+		return err
+	}
+	_, err = db.Exec(`INSERT OR IGNORE INTO invoice_seq(id, next_num) VALUES (1, 1000);`)
+	if err != nil {
+		return err
+	}
+
 	return nil
 }

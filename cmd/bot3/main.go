@@ -48,7 +48,7 @@ func main() {
 			tg3.HandleBroadcastCallback(bot, db, cfg, upd.CallbackQuery)
 
 			// ✅ новое: подтверждение/правка заявки в группе
-			tg3.HandleApprovalCallback(bot, cfg, upd.CallbackQuery)
+			tg3.HandleApprovalCallback(bot, db, cfg, upd.CallbackQuery)
 			continue
 		}
 
