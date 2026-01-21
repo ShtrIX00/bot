@@ -120,11 +120,6 @@ func SendApplicationToApproval(
 	approvalMu.Unlock()
 }
 
-// Оставляем имя SendToApproval, чтобы твой user_inbox.go не менять
-func SendToApproval(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, userChatID int64, userMessageID int, text string, draft applicationDraft) {
-	SendApplicationToApproval(bot, db, cfg, userChatID, userMessageID, text, draft)
-}
-
 func HandleApprovalCallback(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, cq *tgbotapi.CallbackQuery) {
 	if cq == nil || cq.Message == nil || cq.Message.Chat == nil {
 		return

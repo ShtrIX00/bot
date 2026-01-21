@@ -2,6 +2,7 @@ package tg3
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -34,6 +35,21 @@ func ResponderAlias(cfg *config.Config, from *tgbotapi.User) string {
 		return "@" + strings.TrimSpace(from.UserName)
 	}
 	return fmt.Sprintf("id:%d", from.ID)
+}
+
+func parseMoney(s string) (float64, error) {
+	clean := strings.TrimSpace(s)
+	clean = strings.ReplaceAll(clean, " ", "")
+	clean = strings.ReplaceAll(clean, "\u00a0", "")
+	clean = strings.ReplaceAll(clean, ",", ".")
+	if clean == "" {
+		return 0, fmt.Errorf("empty amount")
+	}
+	val, err := strconv.ParseFloat(clean, 64)
+	if err != nil {
+		return 0, fmt.Errorf("bad amount %q", s)
+	}
+	return val, nil
 }
 
 func StartText() string {

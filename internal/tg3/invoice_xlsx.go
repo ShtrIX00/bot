@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
@@ -21,21 +20,6 @@ type appItem struct {
 	Unit      string
 	UnitPrice float64
 	Total     float64
-}
-
-func parseMoney(s string) (float64, error) {
-	clean := strings.TrimSpace(s)
-	clean = strings.ReplaceAll(clean, " ", "")
-	clean = strings.ReplaceAll(clean, "\u00a0", "")
-	clean = strings.ReplaceAll(clean, ",", ".")
-	if clean == "" {
-		return 0, fmt.Errorf("empty amount")
-	}
-	val, err := strconv.ParseFloat(clean, 64)
-	if err != nil {
-		return 0, fmt.Errorf("bad amount %q", s)
-	}
-	return val, nil
 }
 
 func ddmmyyyy(d time.Time) string { return d.Format("02.01.2006") }
@@ -323,7 +307,7 @@ func FillInvoiceTemplateXLSX(
 	_ = f.SetCellValue(sheet, fmt.Sprintf("A%d", a23), fmt.Sprintf("Всего наименований %d, на сумму %.2f", len(items), total))
 
 	// ✅ A24: всегда записываем текст суммы (не формула!)
-	_ = f.SetCellValue(sheet, fmt.Sprintf("A%d", a24), moneyToWordsRU(total))
+	_ = f.SetCellValue(sheet, fmt.Sprintf("A%d", a24), capitalizeFirst(moneyToWordsRU(total)))
 
 	// A26: меняем только дату внутри строки
 	oldA26, _ := f.GetCellValue(sheet, fmt.Sprintf("A%d", a26))
@@ -349,4 +333,14 @@ func FillInvoiceTemplateXLSX(
 		return "", fmt.Errorf("save xlsx: %w", err)
 	}
 	return outPath, nil
+}
+
+func capitalizeFirst(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return s
+	}
+	r := []rune(s)
+	r[0] = []rune(strings.ToUpper(string(r[0])))[0]
+	return string(r)
 }
