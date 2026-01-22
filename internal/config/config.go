@@ -34,6 +34,9 @@ type Config struct {
 	// путь к xlsx-шаблону счёта (используется в bot3)
 	Bot3InvoiceTemplatePath string
 
+	ILoveAPIPublicKey string
+	ILoveAPIRegion    string
+
 	ResponderIDs     map[int64]bool
 	ResponderAliases map[int64]string
 }
@@ -75,6 +78,12 @@ func MustLoad() *Config {
 
 	cfg.ResponderIDs = parseIDs(os.Getenv("RESPONDER_IDS"))
 	cfg.ResponderAliases = parseAliases(os.Getenv("RESPONDER_ALIASES"))
+
+	cfg.ILoveAPIPublicKey = os.Getenv("ILOVEAPI_PUBLIC_KEY")
+	cfg.ILoveAPIRegion = strings.TrimSpace(os.Getenv("ILOVEAPI_REGION"))
+	if cfg.ILoveAPIRegion == "" {
+		cfg.ILoveAPIRegion = "eu"
+	}
 	return cfg
 }
 

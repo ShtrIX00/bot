@@ -24,6 +24,7 @@ type approvalItem struct {
 
 	InvoiceNo int64
 	XlsxPath  string
+	PdfPath   string
 }
 
 var (
@@ -73,6 +74,16 @@ func SendApplicationToApproval(
 		return
 	}
 
+	pdfPath := ""
+	if xlsxPath != "" {
+		if p, err := ConvertXLSXToPDF(cfg, xlsxPath); err != nil {
+			// не роняем процесс целиком: просто логика с предупреждением в approval чат
+			_, _ = bot.Send(tgbotapi.NewMessage(cfg.Bot3ApprovalChatID, "⚠️ Не смог сконвертировать XLSX→PDF: "+err.Error()))
+		} else {
+			pdfPath = p
+		}
+	}
+
 	kb := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("✅ Подтвердить", "app_ok"),
@@ -93,6 +104,12 @@ func SendApplicationToApproval(
 		_, _ = bot.Send(tgbotapi.NewMessage(userChatID, "Не смог отправить счёт на подтверждение."))
 		return
 	}
+	if pdfPath != "" {
+		pdfDoc := tgbotapi.NewDocument(cfg.Bot3ApprovalChatID, tgbotapi.FilePath(pdfPath))
+		pdfDoc.Caption = fmt.Sprintf("Счёт № %d (pdf)", invoiceNo)
+		pdfDoc.ReplyToMessageID = sent.MessageID
+		_, _ = bot.Send(pdfDoc)
+	}
 
 	// как в старом варианте — маппинг reply цепочек
 	_ = storage.AddMap(db, cfg.Bot3ApprovalChatID, sent.MessageID, userChatID, userMessageID)
@@ -107,6 +124,12 @@ func SendApplicationToApproval(
 		}
 	}
 
+	if cfg.Bot3NavigatorChatID != 0 && pdfPath != "" {
+		navPdf := tgbotapi.NewDocument(cfg.Bot3NavigatorChatID, tgbotapi.FilePath(pdfPath))
+		navPdf.Caption = fmt.Sprintf("Счёт № %d (pdf)", invoiceNo)
+		_, _ = bot.Send(navPdf)
+	}
+
 	approvalMu.Lock()
 	approvalByID[sent.MessageID] = &approvalItem{
 		UserChatID:    userChatID,
@@ -116,6 +139,7 @@ func SendApplicationToApproval(
 		AwaitFix:      false,
 		InvoiceNo:     invoiceNo,
 		XlsxPath:      xlsxPath,
+		PdfPath:       pdfPath,
 	}
 	approvalMu.Unlock()
 }
@@ -141,14 +165,19 @@ func HandleApprovalCallback(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config
 
 	switch cq.Data {
 	case "app_ok":
-		if item.XlsxPath == "" {
+		// приоритет PDF
+		if item.PdfPath != "" {
+			doc := tgbotapi.NewDocument(item.UserChatID, tgbotapi.FilePath(item.PdfPath))
+			doc.Caption = "Счёт на оплату № " + strconv.FormatInt(item.InvoiceNo, 10)
+			_, _ = bot.Send(doc)
+		} else if item.XlsxPath != "" {
+			doc := tgbotapi.NewDocument(item.UserChatID, tgbotapi.FilePath(item.XlsxPath))
+			doc.Caption = "Счёт на оплату № " + strconv.FormatInt(item.InvoiceNo, 10) + " (xlsx)"
+			_, _ = bot.Send(doc)
+		} else {
 			_, _ = bot.Send(tgbotapi.NewMessage(item.UserChatID, "Не найден файл счёта для отправки."))
 			return
 		}
-
-		doc := tgbotapi.NewDocument(item.UserChatID, tgbotapi.FilePath(item.XlsxPath))
-		doc.Caption = "Счёт на оплату № " + strconv.FormatInt(item.InvoiceNo, 10)
-		_, _ = bot.Send(doc)
 
 		ack := tgbotapi.NewMessage(cfg.Bot3ApprovalChatID, "✅ Счёт отправлен пользователю.")
 		ack.ReplyToMessageID = approvalMsgID
