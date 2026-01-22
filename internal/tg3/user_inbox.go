@@ -101,7 +101,6 @@ func normalizeOrgName(s string) string {
 		"зао", "",
 		"пао", "",
 		"ао", "",
-		"ип", "",
 		`"`, "",
 		"«", "",
 		"»", "",
