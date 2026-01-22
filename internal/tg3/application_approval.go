@@ -25,6 +25,7 @@ type approvalItem struct {
 	InvoiceNo int64
 	XlsxPath  string
 	PdfPath   string
+	TempDir   string
 }
 
 var (
@@ -68,15 +69,18 @@ func SendApplicationToApproval(
 	}
 
 	// 4) генерим xlsx
-	xlsxPath, perr := FillInvoiceTemplateXLSX(tpl, os.TempDir(), invoiceNo, now, draft, draft.Items)
+	tempDir, _ := os.MkdirTemp("", "tg3-invoice-*")
+
+	xlsxPath, perr := FillInvoiceTemplateXLSX(tpl, tempDir, invoiceNo, now, draft, draft.Items)
 	if perr != nil {
+		_ = os.RemoveAll(tempDir)
 		_, _ = bot.Send(tgbotapi.NewMessage(userChatID, "Не смог сформировать счёт: "+perr.Error()))
 		return
 	}
 
 	pdfPath := ""
 	if xlsxPath != "" {
-		if p, err := ConvertXLSXToPDFLibreOffice(cfg, xlsxPath); err != nil {
+		if p, err := ConvertXLSXToPDFLibreOffice(cfg, xlsxPath, tempDir); err != nil {
 			// не роняем процесс целиком: просто логика с предупреждением в approval чат
 			_, _ = bot.Send(tgbotapi.NewMessage(cfg.Bot3ApprovalChatID, "⚠️ Не смог сконвертировать XLSX→PDF: "+err.Error()))
 		} else {
@@ -102,6 +106,7 @@ func SendApplicationToApproval(
 		_, _ = bot.Send(tgbotapi.NewMessage(cfg.Bot3ApprovalChatID, "❌ Не смог отправить XLSX в этот чат: "+sendErr.Error()))
 		// И на всякий случай уведомим пользователя
 		_, _ = bot.Send(tgbotapi.NewMessage(userChatID, "Не смог отправить счёт на подтверждение."))
+		_ = os.RemoveAll(tempDir)
 		return
 	}
 	if pdfPath != "" {
@@ -140,6 +145,7 @@ func SendApplicationToApproval(
 		InvoiceNo:     invoiceNo,
 		XlsxPath:      xlsxPath,
 		PdfPath:       pdfPath,
+		TempDir:       tempDir,
 	}
 	approvalMu.Unlock()
 }
@@ -182,6 +188,8 @@ func HandleApprovalCallback(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config
 		ack := tgbotapi.NewMessage(cfg.Bot3ApprovalChatID, "✅ Счёт отправлен пользователю.")
 		ack.ReplyToMessageID = approvalMsgID
 		_, _ = bot.Send(ack)
+
+		cleanupApprovalFiles(item)
 
 		approvalMu.Lock()
 		delete(approvalByID, approvalMsgID)
@@ -230,7 +238,24 @@ func HandleApprovalGroupMessage(bot *tgbotapi.BotAPI, cfg *config.Config, m *tgb
 	ack.ReplyToMessageID = targetID
 	_, _ = bot.Send(ack)
 
+	cleanupApprovalFiles(item)
+
 	approvalMu.Lock()
 	delete(approvalByID, targetID)
 	approvalMu.Unlock()
+}
+
+func cleanupApprovalFiles(it *approvalItem) {
+	if it == nil {
+		return
+	}
+	if it.XlsxPath != "" {
+		_ = os.Remove(it.XlsxPath)
+	}
+	if it.PdfPath != "" {
+		_ = os.Remove(it.PdfPath)
+	}
+	if it.TempDir != "" {
+		_ = os.RemoveAll(it.TempDir)
+	}
 }

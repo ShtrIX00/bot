@@ -219,9 +219,9 @@ func FillInvoiceTemplateXLSX(
 	_ = f.SetCellValue(sheet, "A9", fmt.Sprintf("Счёт на оплату № %d от %s", invoiceNo, ruDateWords(invoiceDate)))
 
 	// E13: "название юр. лица, ИНН, КПП, Адрес"
-	name := strings.TrimSpace(draft.LegalName)
+	name := strings.TrimSpace(draft.RusName)
 	if name == "" {
-		name = strings.TrimSpace(draft.RusName)
+		name = strings.TrimSpace(draft.LegalName)
 	}
 	inn := strings.TrimSpace(draft.INN)
 	kpp := strings.TrimSpace(draft.RusKPP)

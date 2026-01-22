@@ -4,8 +4,10 @@ import (
 	"database/sql"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -83,6 +85,51 @@ var (
 	supportMu        sync.RWMutex
 	supportQuestions = map[string]bool{} // key = "chatID:msgID"
 )
+
+var reOrgClean = regexp.MustCompile(`[^\pL\pN]+`)
+
+func normalizeOrgName(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+
+	// частые формы — убираем, чтобы не мешали сравнению
+	repl := []string{
+		"общество с ограниченной ответственностью", "",
+		"акционерное общество", "",
+		"публичное акционерное общество", "",
+		"ооо", "",
+		"оао", "",
+		"зао", "",
+		"пао", "",
+		"ао", "",
+		"ип", "",
+		`"`, "",
+		"«", "",
+		"»", "",
+	}
+	for i := 0; i < len(repl); i += 2 {
+		s = strings.ReplaceAll(s, repl[i], repl[i+1])
+	}
+
+	s = reOrgClean.ReplaceAllString(s, "")
+	return s
+}
+
+func orgNamesMatch(a, b string) bool {
+	na := normalizeOrgName(a)
+	nb := normalizeOrgName(b)
+
+	// если вдруг rusprofile не дал имя — не блокируем
+	if nb == "" {
+		return true
+	}
+	// если пользователь ввёл пусто/мусор — точно не совпало
+	if na == "" {
+		return false
+	}
+
+	// строгое совпадение
+	return na == nb
+}
 
 func markSupportQuestion(chatID int64, msgID int) {
 	supportMu.Lock()
@@ -253,7 +300,13 @@ func promptForStage(bot *tgbotapi.BotAPI, chatID int64, st *userAppState) {
 		_, _ = bot.Send(msg)
 
 	case stageAwaitItemLineTotal:
-		msg := tgbotapi.NewMessage(chatID, "Введите ОБЩУЮ стоимость по позиции (итого по строке). Это НЕ цена за единицу:")
+		var q string
+		if st.CurItem.Qty == 1 {
+			q = "Введите итоговую сумму по позиции (она же цена за единицу, т.к. количество = 1):"
+		} else {
+			q = "Введите ОБЩУЮ стоимость по позиции (итого по строке). Это НЕ цена за единицу:"
+		}
+		msg := tgbotapi.NewMessage(chatID, q)
 		msg.ReplyMarkup = stepControlKeyboard()
 		_, _ = bot.Send(msg)
 
@@ -491,8 +544,25 @@ func HandleUserMessage(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, m *
 			promptForStage(bot, m.Chat.ID, st)
 			return
 		}
+
+		// если есть имя из Rusprofile — проверяем совпадение
+		if st.Draft.RusName != "" && !orgNamesMatch(txt, st.Draft.RusName) {
+			msg := tgbotapi.NewMessage(
+				m.Chat.ID,
+				fmt.Sprintf(
+					"По ИНН %s в Rusprofile организация указана как:\n%s\n\nПожалуйста, введите название юридического лица ещё раз (как в Rusprofile).",
+					st.Draft.INN,
+					st.Draft.RusName,
+				),
+			)
+			msg.ReplyMarkup = stepControlKeyboard()
+			_, _ = bot.Send(msg)
+			return
+		}
+
+		// ✅ храним ввод пользователя для текста/сообщений
 		st.Draft.LegalName = txt
-		// начинаем заполнять позиции
+
 		st.Stage = stageAwaitItemName
 		st.CurItem = appItem{}
 		promptForStage(bot, m.Chat.ID, st)
@@ -538,7 +608,14 @@ func HandleUserMessage(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, m *
 			u = ""
 		}
 		st.CurItem.Unit = u
-		st.Stage = stageAwaitItemUnitPrice
+
+		// если количество 1 — пропускаем ввод цены за единицу, спрашиваем только итог
+		if st.CurItem.Qty == 1 {
+			st.Stage = stageAwaitItemLineTotal
+		} else {
+			st.Stage = stageAwaitItemUnitPrice
+		}
+
 		promptForStage(bot, m.Chat.ID, st)
 		return
 
@@ -571,6 +648,44 @@ func HandleUserMessage(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, m *
 			_, _ = bot.Send(msg)
 			return
 		}
+		// qty==1: введённая сумма = и цена за единицу, и итог
+		if st.CurItem.Qty == 1 {
+			st.CurItem.UnitPrice = s
+			st.CurItem.Total = s
+			st.Draft.Items = append(st.Draft.Items, st.CurItem)
+			st.CurItem = appItem{}
+			st.Stage = stageAskMoreItems
+			promptForStage(bot, m.Chat.ID, st)
+			return
+		}
+
+		// qty>1: проверка корректности суммы
+		expected := float64(st.CurItem.Qty) * st.CurItem.UnitPrice
+
+		if math.Abs(expected-s) > 0.0001 {
+			// 1️⃣ первое сообщение — ТОЛЬКО про ошибку
+			_, _ = bot.Send(tgbotapi.NewMessage(
+				m.Chat.ID,
+				fmt.Sprintf(
+					"Сумма не сходится: %d × %.2f = %.2f, а вы ввели %.2f.",
+					st.CurItem.Qty, st.CurItem.UnitPrice, expected, s,
+				),
+			))
+
+			// 2️⃣ второе сообщение — инструкция + клавиатура
+			msg2 := tgbotapi.NewMessage(
+				m.Chat.ID,
+				"Введите заново цену за единицу и итог по этой позиции.",
+			)
+			msg2.ReplyMarkup = stepControlKeyboard()
+			_, _ = bot.Send(msg2)
+
+			// возвращаемся на ввод цены
+			st.CurItem.Total = 0
+			st.Stage = stageAwaitItemUnitPrice
+			return
+		}
+
 		st.CurItem.Total = s
 		st.Draft.Items = append(st.Draft.Items, st.CurItem)
 		st.CurItem = appItem{}

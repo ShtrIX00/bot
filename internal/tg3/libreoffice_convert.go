@@ -15,19 +15,22 @@ import (
 
 var libreOfficeMu sync.Mutex
 
-func ConvertXLSXToPDFLibreOffice(cfg *config.Config, xlsxPath string) (string, error) {
-	libreOfficeMu.Lock()
-	defer libreOfficeMu.Unlock()
+func ConvertXLSXToPDFLibreOffice(cfg *config.Config, xlsxPath, outDir string) (string, error) {
 	if strings.TrimSpace(xlsxPath) == "" {
 		return "", fmt.Errorf("xlsxPath is empty")
 	}
+	if strings.TrimSpace(outDir) == "" {
+		outDir = os.TempDir()
+	}
+
+	libreOfficeMu.Lock()
+	defer libreOfficeMu.Unlock()
 
 	inAbs, err := filepath.Abs(xlsxPath)
 	if err != nil {
 		return "", fmt.Errorf("abs input: %w", err)
 	}
 
-	outDir := os.TempDir()
 	base := filepath.Base(inAbs)
 	pdfName := strings.TrimSuffix(base, filepath.Ext(base)) + ".pdf"
 	outPDF := filepath.Join(outDir, pdfName)
@@ -53,7 +56,6 @@ func ConvertXLSXToPDFLibreOffice(cfg *config.Config, xlsxPath string) (string, e
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	// таймаут (LibreOffice иногда подвисает при первом запуске)
 	done := make(chan error, 1)
 	go func() { done <- cmd.Run() }()
 
