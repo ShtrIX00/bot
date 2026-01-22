@@ -37,6 +37,8 @@ type Config struct {
 	ILoveAPIPublicKey string
 	ILoveAPIRegion    string
 
+	SofficePath string
+
 	ResponderIDs     map[int64]bool
 	ResponderAliases map[int64]string
 }
@@ -84,6 +86,8 @@ func MustLoad() *Config {
 	if cfg.ILoveAPIRegion == "" {
 		cfg.ILoveAPIRegion = "eu"
 	}
+
+	cfg.SofficePath = strings.TrimSpace(os.Getenv("SOFFICE_PATH"))
 	return cfg
 }
 

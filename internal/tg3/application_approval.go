@@ -76,7 +76,7 @@ func SendApplicationToApproval(
 
 	pdfPath := ""
 	if xlsxPath != "" {
-		if p, err := ConvertXLSXToPDF(cfg, xlsxPath); err != nil {
+		if p, err := ConvertXLSXToPDFLibreOffice(cfg, xlsxPath); err != nil {
 			// не роняем процесс целиком: просто логика с предупреждением в approval чат
 			_, _ = bot.Send(tgbotapi.NewMessage(cfg.Bot3ApprovalChatID, "⚠️ Не смог сконвертировать XLSX→PDF: "+err.Error()))
 		} else {
